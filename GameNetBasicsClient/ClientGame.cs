@@ -11,6 +11,7 @@ using System.Net.Sockets;
 using System.Text;
 using GameNetBasicsCommon;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace GameNetBasicsClient
 {
@@ -52,20 +53,10 @@ namespace GameNetBasicsClient
 			base.LoadContent();
 		}
 
-		protected override void UnloadContent()
-		{
-			base.UnloadContent();
-			_playerTexture?.Dispose();
-			_spriteBatch?.Dispose();
-			_graphics.Dispose();
-		}
-
 		protected override void Dispose(bool disposing)
 		{
+			_client?.Dispose();
 			base.Dispose(disposing);
-			if (!disposing)
-				return;
-			_client.Dispose();  // TODO: This disposal isn't thread safe.
 		}
 
 		protected override void Update(GameTime gameTime)
@@ -110,6 +101,13 @@ namespace GameNetBasicsClient
 			base.Draw(gameTime);
 		}
 
+		protected override void OnExiting(object sender, EventArgs args)
+		{
+			Debug.WriteLine($"Closing connection: {_client.Client.LocalEndPoint} -> {_client.Client.RemoteEndPoint}");
+			_client.Close();
+			base.OnExiting(sender, args);
+		}
+
 		// Initializes the connection (via UDP sockets) with the server. Several messages are sent
 		// back and forth as part of the connection protocol.
 		private void InitializeServerConnection()
@@ -118,26 +116,54 @@ namespace GameNetBasicsClient
 			// project.
 			_client = new UdpClient();
 			// First we send the CONNECTION_INITIATION message to the server's connection port.
+			var serverConnEndpoint = new IPEndPoint(
+				IPAddress.Parse(Protocol.CONNECTION_HOSTNAME), Protocol.CONNECTION_PORT);
 			byte[] connBytes = Encoding.ASCII.GetBytes(Protocol.CONNECTION_INITIATION);
-			_client.Send(connBytes, connBytes.Length, Protocol.CONNECTION_HOSTNAME, Protocol.CONNECTION_PORT);
-			Debug.WriteLine($"Sent connection request: {_client.Client.LocalEndPoint} -> {Protocol.CONNECTION_HOSTNAME}:{Protocol.CONNECTION_PORT}");
+			try
+			{
+				_client.Send(connBytes, connBytes.Length, serverConnEndpoint);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while sending connection initiation message to {serverConnEndpoint} server: {ex}");
+				throw ex;
+			}
+			Debug.WriteLine($"Sent connection request: {_client.Client.LocalEndPoint} -> {serverConnEndpoint}");
 			// Then we should receive the CONNECTION_ACK message from the server.
-			var sender = new IPEndPoint(IPAddress.Any, 0);
-			byte[] receivedBytes = _client.Receive(ref sender);
+			var serverUpdatesEndpoint = new IPEndPoint(IPAddress.Any, 0);
+			byte[] receivedBytes;
+			try
+			{
+				receivedBytes = _client.Receive(ref serverUpdatesEndpoint);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while trying to receive connection ACK from {serverConnEndpoint} server: {ex}");
+				throw ex;
+			}
 			string receivedMessage = Encoding.ASCII.GetString(receivedBytes);
 			if (receivedMessage != Protocol.CONNECTION_ACK)
 			{
-				Debug.WriteLine($"!! Unrecognized connection message from {sender} server: \"{receivedMessage}\"");
-				return;  // TODO: Properly handle this error.
+				string errorMessage = $"Unrecognized connection ACK message from {serverUpdatesEndpoint} server: \"{receivedMessage}\"";
+				Debug.WriteLine(errorMessage);
+				throw new InvalidOperationException(errorMessage);
 			}
-			Debug.WriteLine($"Received ACK from server. Connecting to {sender}");
+			Debug.WriteLine($"Received ACK from server. Connecting to {serverUpdatesEndpoint}");
 			// We connect to the port that the server sent the ACK message on. This will be a
 			// different port than the connection port.
-			_client.Connect(sender);
-			Debug.WriteLine("Connected to server");
+			try
+			{
+				_client.Connect(serverUpdatesEndpoint);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while connecting to {serverUpdatesEndpoint} server: {ex}");
+				throw ex;
+			}
+			Debug.WriteLine($"Connected client to server: {_client.Client.LocalEndPoint} -> {serverUpdatesEndpoint}");
 			// Start a separate thread to listen for game state updates from the server.
 			var thread = new Thread(ListenForStateUpdates);
-			thread.Start(sender);
+			thread.Start(serverUpdatesEndpoint);
 		}
 
 		// Listens for game state updates from the server. When an update arrives, it is stored
@@ -147,11 +173,24 @@ namespace GameNetBasicsClient
 			var sender = new IPEndPoint(IPAddress.Any, 0);
 			while (true)
 			{
-				byte[] receivedBytes = _client.Receive(ref sender);
+				// When the socket is closed, Receive() will throw an exception, and then the
+				// client will stop listening for server state updates. There's probably a way to
+				// do this more gracefully (e.g. using a cancellation token to cancel any ongoing
+				// ReceiveAsync() calls), but this will do for now.
+				byte[] receivedBytes;
+				try
+				{
+					receivedBytes = _client.Receive(ref sender);
+				}
+				catch (SocketException ex)
+				{
+					Debug.WriteLine($"Exception thrown while listening for game state updates. Stopping the listener. Exception: {ex}");
+					return;
+				}
 				if (receivedBytes.Length != sizeof(int) * 2)
 				{
-					Debug.WriteLine($"!! Received a message of unexpected size: got {receivedBytes.Length}, want {sizeof(int) * 2}");
-					continue;
+					throw new InvalidOperationException(
+						$"Received a game state update message of unexpected size: got {receivedBytes.Length}, want {sizeof(int) * 2}");
 				}
 				// Messages received from the server are assumed to be the X and Y coordinates of
 				// the player.
@@ -174,7 +213,22 @@ namespace GameNetBasicsClient
 			dataList.AddRange(BitConverter.GetBytes(leftPressed));
 			dataList.AddRange(BitConverter.GetBytes(rightPressed));
 			byte[] data = dataList.ToArray();
-			_client.SendAsync(data, data.Length);
+			// Send data to the server asynchronously.
+			Task.Run(() => SendDataToServer(data, "input"));
+		}
+
+		// Sends the given data to the server. dataDescription is used for context in the exception
+		// message if an exception is thrown.
+		private void SendDataToServer(byte[] data, string dataDescription)
+		{
+			try
+			{
+				_client.Send(data, data.Length);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while sending {dataDescription} to server: {ex}");
+			}
 		}
 	}
 }

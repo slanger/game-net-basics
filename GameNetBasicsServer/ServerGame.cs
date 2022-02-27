@@ -11,6 +11,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using GameNetBasicsCommon;
+using System.Threading.Tasks;
 
 namespace GameNetBasicsServer
 {
@@ -24,7 +25,6 @@ namespace GameNetBasicsServer
 
 		private UdpClient _connectionClient;
 		private UdpClient _client = null;
-		private readonly object _clientInitializationLock = new object();
 		private ClientState _clientState = new ClientState();
 		private List<InputFrame> _inputFrames = new List<InputFrame>(20);
 		private readonly object _inputFramesLock = new object();
@@ -63,22 +63,11 @@ namespace GameNetBasicsServer
 			base.LoadContent();
 		}
 
-		protected override void UnloadContent()
-		{
-			base.UnloadContent();
-			_playerTexture?.Dispose();
-			_spriteBatch?.Dispose();
-			_graphics.Dispose();
-		}
-
 		protected override void Dispose(bool disposing)
 		{
-			base.Dispose(disposing);
-			if (!disposing)
-				return;
-			// TODO: The following disposals aren't thread safe.
 			_client?.Dispose();
 			_connectionClient?.Dispose();
+			base.Dispose(disposing);
 		}
 
 		protected override void Update(GameTime gameTime)
@@ -96,25 +85,6 @@ namespace GameNetBasicsServer
 				_inputFrames.CopyTo(inputs);
 				_inputFrames.Clear();
 			}
-			Debug.WriteLine($"Processing {inputs.Length} input frames");
-
-			/*
-			string inputString = "";
-			foreach (InputFrame input in inputs)
-			{
-				List<string> strs = new List<string>(4);
-				if (input.UpPressed)
-					strs.Add("^");
-				if (input.DownPressed)
-					strs.Add("V");
-				if (input.LeftPressed)
-					strs.Add("<");
-				if (input.RightPressed)
-					strs.Add(">");
-				inputString += string.Join(' ', strs) + ", ";
-			}
-			Debug.WriteLine($"{inputString}");
-			*/
 
 			foreach (InputFrame input in inputs)
 			{
@@ -128,11 +98,8 @@ namespace GameNetBasicsServer
 					_clientState.X += Protocol.PLAYER_SPEED;
 			}
 
-			lock (_clientInitializationLock)
-			{
-				if (_client != null)
-					SendStateToClients();
-			}
+			if (_client != null)
+				SendStateToClient();
 
 			base.Update(gameTime);
 		}
@@ -176,7 +143,20 @@ namespace GameNetBasicsServer
 			while (true)
 			{
 				Debug.WriteLine($"Listening for client connections at {_connectionClient.Client.LocalEndPoint}");
-				byte[] receivedBytes = _connectionClient.Receive(ref sender);
+				// When the socket is closed, Receive() will throw an exception, and then the
+				// server will stop listening for client connections. There's probably a way to do
+				// this more gracefully (e.g. using a cancellation token to cancel any ongoing
+				// ReceiveAsync() calls), but this will do for now.
+				byte[] receivedBytes;
+				try
+				{
+					receivedBytes = _connectionClient.Receive(ref sender);
+				}
+				catch (SocketException ex)
+				{
+					Debug.WriteLine($"Exception thrown while listening for client connections: {ex}");
+					return;
+				}
 				string receivedMessage = Encoding.ASCII.GetString(receivedBytes);
 				if (receivedMessage != Protocol.CONNECTION_INITIATION)
 				{
@@ -191,23 +171,39 @@ namespace GameNetBasicsServer
 
 		// Establishes a connection with the client via the connection protocol, and then listens
 		// for client input. 
-		private void HandleClient(object senderEndpoint)
+		private void HandleClient(object clientEndpointObj)
 		{
 			// The connection protocol is super basic and not robust, but it will work for this
 			// project.
 			// TODO: Handle more than one client.
-			IPEndPoint sender = (IPEndPoint)senderEndpoint;
-			Debug.WriteLine($"Created new thread for {sender} client");
+			IPEndPoint clientEndpoint = (IPEndPoint)clientEndpointObj;
+			Debug.WriteLine($"Created new thread for {clientEndpoint} client");
 			var client = new UdpClient();
-			client.Connect(sender);
+			try
+			{
+				client.Connect(clientEndpoint);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while connecting to {clientEndpoint} client: {ex}");
+				return;
+			}
 			Debug.WriteLine($"Connected new socket: {client.Client.LocalEndPoint} -> {client.Client.RemoteEndPoint}");
 			byte[] connAck = Encoding.ASCII.GetBytes(Protocol.CONNECTION_ACK);
-			client.Send(connAck, connAck.Length);
-			Debug.WriteLine($"Sent connection ACK to {sender} client");
-			lock (_clientInitializationLock)
+			try
 			{
-				_client = client;
+				client.Send(connAck, connAck.Length);
 			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while sending connection ACK to {clientEndpoint} client: {ex}");
+				return;
+			}
+			Debug.WriteLine($"Sent connection ACK to {clientEndpoint} client");
+			// Need to store the client in _client AFTER it's all set up, because _client is used
+			// in another thread and we don't want to send game state updates on an uninitialized
+			// socket.
+			_client = client;
 			ListenForClientInput(client);
 		}
 
@@ -217,7 +213,20 @@ namespace GameNetBasicsServer
 			var sender = new IPEndPoint(IPAddress.Any, 0);
 			while (true)
 			{
-				byte[] receivedBytes = client.Receive(ref sender);
+				// When the socket is closed, Receive() will throw an exception, and then the
+				// server will stop listening for client input. There's probably a way to do this
+				// more gracefully (e.g. using a cancellation token to cancel any ongoing
+				// ReceiveAsync() calls), but this will do for now.
+				byte[] receivedBytes;
+				try
+				{
+					receivedBytes = client.Receive(ref sender);
+				}
+				catch (SocketException ex)
+				{
+					Debug.WriteLine($"Exception thrown for {client.Client.RemoteEndPoint} client. Closing socket. Exception: {ex}");
+					return;
+				}
 				if (receivedBytes.Length != sizeof(bool) * 4)
 				{
 					Debug.WriteLine($"!! Received a message of unexpected size: got {receivedBytes.Length}, want {sizeof(bool) * 4}");
@@ -237,14 +246,29 @@ namespace GameNetBasicsServer
 			}
 		}
 
-		// Sends the current game state to the clients.
-		private void SendStateToClients()
+		// Sends the current game state to the client.
+		private void SendStateToClient()
 		{
 			List<byte> dataList = new List<byte>();
 			dataList.AddRange(BitConverter.GetBytes(_clientState.X));
 			dataList.AddRange(BitConverter.GetBytes(_clientState.Y));
 			byte[] data = dataList.ToArray();
-			_client.SendAsync(data, data.Length);
+			// Send data to the server asynchronously.
+			Task.Run(() => SendDataToClient(data, "gamestate"));
+		}
+
+		// Sends the given data to the client. dataDescription is used for context in the exception
+		// message if an exception is thrown.
+		private void SendDataToClient(byte[] data, string dataDescription)
+		{
+			try
+			{
+				_client.Send(data, data.Length);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while sending {dataDescription} to client: {ex}");
+			}
 		}
 	}
 }

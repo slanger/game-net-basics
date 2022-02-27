@@ -2,7 +2,7 @@
 {
 	public class Protocol
 	{
-		public const string CONNECTION_HOSTNAME = "localhost";
+		public const string CONNECTION_HOSTNAME = "127.0.0.1";
 		public const int CONNECTION_PORT = 11000;
 		public const string CONNECTION_INITIATION = "GameNetBasics: CONNECT";
 		public const string CONNECTION_ACK = "GameNetBasics: ACK";
