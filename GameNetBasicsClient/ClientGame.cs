@@ -9,9 +9,9 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using GameNetBasicsCommon;
 using System.Threading;
 using System.Threading.Tasks;
+using GameNetBasicsCommon;
 
 namespace GameNetBasicsClient
 {
@@ -19,9 +19,11 @@ namespace GameNetBasicsClient
 	{
 		private GraphicsDeviceManager _graphics;
 		private SpriteBatch _spriteBatch;
+		private SpriteFont _debugFont;
 		private Texture2D _playerTexture;
 		private Rectangle _playerCollider = new Rectangle(
 			Protocol.PLAYER_START_X, Protocol.PLAYER_START_Y, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT);
+		private double _framerate;
 
 		private UdpClient _client;
 		private ClientState _clientState;
@@ -48,6 +50,7 @@ namespace GameNetBasicsClient
 		protected override void LoadContent()
 		{
 			_spriteBatch = new SpriteBatch(GraphicsDevice);
+			_debugFont = Content.Load<SpriteFont>("Debug");
 			_playerTexture = new Texture2D(GraphicsDevice, 1, 1);
 			_playerTexture.SetData(new[] { Color.Green });
 			base.LoadContent();
@@ -61,6 +64,8 @@ namespace GameNetBasicsClient
 
 		protected override void Update(GameTime gameTime)
 		{
+			_framerate = 1d / gameTime.ElapsedGameTime.TotalSeconds;
+
 			KeyboardState keyState = Keyboard.GetState();
 			if (keyState.IsKeyDown(Keys.Escape))
 				Exit();
@@ -94,9 +99,16 @@ namespace GameNetBasicsClient
 
 		protected override void Draw(GameTime gameTime)
 		{
+			double drawFramerate = 1d / gameTime.ElapsedGameTime.TotalSeconds;
+
 			GraphicsDevice.Clear(Color.CornflowerBlue);
 			_spriteBatch.Begin();
 			_spriteBatch.Draw(_playerTexture, _playerCollider, Color.White);
+			_spriteBatch.DrawString(
+				spriteFont: _debugFont,
+				text: $"FPS: {_framerate:0.00}, {drawFramerate:0.00}",
+				position: new Vector2(5, 5),
+				color: new Color(31, 246, 31));
 			_spriteBatch.End();
 			base.Draw(gameTime);
 		}

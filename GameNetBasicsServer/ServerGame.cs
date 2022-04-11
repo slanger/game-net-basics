@@ -10,8 +10,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using GameNetBasicsCommon;
 using System.Threading.Tasks;
+using GameNetBasicsCommon;
 
 namespace GameNetBasicsServer
 {
@@ -19,8 +19,8 @@ namespace GameNetBasicsServer
 	{
 		private GraphicsDeviceManager _graphics;
 		private SpriteBatch _spriteBatch;
+		private SpriteFont _debugFont;
 		private Texture2D _playerTexture;
-		private SpriteFont _logFont;
 		private double _framerate;
 
 		private UdpClient _connectionClient;
@@ -57,9 +57,9 @@ namespace GameNetBasicsServer
 		protected override void LoadContent()
 		{
 			_spriteBatch = new SpriteBatch(GraphicsDevice);
+			_debugFont = Content.Load<SpriteFont>("Debug");
 			_playerTexture = new Texture2D(GraphicsDevice, 1, 1);
 			_playerTexture.SetData(new[] { Color.Green });
-			_logFont = Content.Load<SpriteFont>("ServerLog");
 			base.LoadContent();
 		}
 
@@ -110,15 +110,18 @@ namespace GameNetBasicsServer
 
 			GraphicsDevice.Clear(Color.CornflowerBlue);
 			_spriteBatch.Begin();
+			if (_client != null)
+			{
+				_spriteBatch.Draw(
+					texture: _playerTexture,
+					destinationRectangle: new Rectangle(_clientState.X, _clientState.Y, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT),
+					color: Color.White);
+			}
 			_spriteBatch.DrawString(
-				spriteFont: _logFont,
+				spriteFont: _debugFont,
 				text: $"FPS: {_framerate:0.00}, {drawFramerate:0.00}",
 				position: new Vector2(5, 5),
 				color: new Color(31, 246, 31));
-			_spriteBatch.Draw(
-				_playerTexture,
-				new Rectangle(_clientState.X, _clientState.Y, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT),
-				Color.White);
 			_spriteBatch.End();
 
 			base.Draw(gameTime);
