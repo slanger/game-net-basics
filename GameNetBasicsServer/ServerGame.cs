@@ -25,9 +25,12 @@ namespace GameNetBasicsServer
 
 		private UdpClient _connectionClient;
 		private UdpClient _client = null;
-		private ClientState _clientState = new ClientState();
+		private ClientState _clientState;
 		private List<InputFrame> _inputFrames = new List<InputFrame>(20);
 		private readonly object _inputFramesLock = new object();
+
+		private const int INITIAL_X = 375;
+		private const int INITIAL_Y = 200;
 
 		private struct InputFrame
 		{
@@ -206,6 +209,9 @@ namespace GameNetBasicsServer
 			// Need to store the client in _client AFTER it's all set up, because _client is used
 			// in another thread and we don't want to send game state updates on an uninitialized
 			// socket.
+			_clientState = new ClientState();
+			_clientState.X = INITIAL_X;
+			_clientState.Y = INITIAL_Y;
 			_client = client;
 			ListenForClientInput(client);
 		}
