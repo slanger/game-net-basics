@@ -23,10 +23,15 @@ namespace GameNetBasicsClient
 		private Rectangle _playerCollider = new Rectangle(
 			Protocol.PLAYER_START_X, Protocol.PLAYER_START_Y, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT);
 		private double _framerate;
+		private readonly Random _rng = new Random();
 
 		private UdpClient _client;
 		private ClientState _clientState;
 		private readonly object _clientStateLock = new object();
+
+		private TcpClient _settingsChannel;
+		private int _roundtripDelayMillis;
+		private int _jitterMillis;
 
 		public ClientGame()
 		{
@@ -103,9 +108,10 @@ namespace GameNetBasicsClient
 			GraphicsDevice.Clear(Color.CornflowerBlue);
 			_spriteBatch.Begin();
 			_spriteBatch.Draw(_playerTexture, _playerCollider, Color.White);
+			// TODO: Add a brief description of the controls.
 			_spriteBatch.DrawString(
 				spriteFont: _debugFont,
-				text: $"FPS: {_framerate:0.00}, {drawFramerate:0.00}",
+				text: $"FPS: {_framerate:0.00}, {drawFramerate:0.00}\nRound-trip delay: {_roundtripDelayMillis}ms\nJitter: +/-{_jitterMillis}ms",
 				position: new Vector2(5, 5),
 				color: new Color(31, 246, 31));
 			_spriteBatch.End();
@@ -126,8 +132,11 @@ namespace GameNetBasicsClient
 			// The connection protocol is super basic and not robust, but it will work for this
 			// project.
 
-			// First we set up the client connection by sending the CONNECTION_INITIATION message
-			// to the server's connection port.
+			// First we set up the settings channel and get the initial settings.
+			SetUpSettingsChannel();
+
+			// Then we set up the client connection by sending the CONNECTION_INITIATION message to
+			// the server's connection port.
 			_client = new UdpClient();
 			var serverConnEndpoint = new IPEndPoint(
 				IPAddress.Parse(Protocol.SERVER_HOSTNAME), Protocol.CONNECTION_PORT);
@@ -180,6 +189,89 @@ namespace GameNetBasicsClient
 			thread.Start(serverUpdatesEndpoint);
 		}
 
+		// Sets up the settings channel and receives the initial settings.
+		private void SetUpSettingsChannel()
+		{
+			// Connect to the server's settings channel.
+			_settingsChannel = new TcpClient();
+			try
+			{
+				_settingsChannel.Connect(Protocol.SERVER_HOSTNAME, Protocol.SETTINGS_CHANNEL_PORT);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while trying to connect to {_settingsChannel.Client.RemoteEndPoint} server's settings channel: {ex}");
+				throw ex;
+			}
+			Debug.WriteLine($"Connected settings channel: {_settingsChannel.Client.LocalEndPoint} -> {_settingsChannel.Client.RemoteEndPoint}");
+
+			// Receive initial settings.
+			byte[] settingsBytes = new byte[4 * sizeof(int)];
+			int numBytes;
+			try
+			{
+				numBytes = _settingsChannel.GetStream().Read(settingsBytes);
+			}
+			catch (SocketException ex)
+			{
+				Debug.WriteLine($"Exception thrown while trying to receive initial settings from {_settingsChannel.Client.RemoteEndPoint} server: {ex}");
+				throw ex;
+			}
+			if (numBytes != settingsBytes.Length)
+			{
+				string errorMessage = $"Unrecognized settings message from {_settingsChannel.Client.RemoteEndPoint} server: got {numBytes} bytes, want {settingsBytes.Length} bytes";
+				Debug.WriteLine(errorMessage);
+				throw new InvalidOperationException(errorMessage);
+			}
+			int i = 0;
+			_roundtripDelayMillis = BitConverter.ToInt32(settingsBytes, i);
+			i += sizeof(int);
+			_jitterMillis = BitConverter.ToInt32(settingsBytes, i);
+			i += sizeof(int);
+			var state = new ClientState();
+			state.X = BitConverter.ToInt32(settingsBytes, i);
+			i += sizeof(int);
+			state.Y = BitConverter.ToInt32(settingsBytes, i);
+			lock (_clientStateLock)
+			{
+				_clientState = state;
+			}
+			Debug.WriteLine("Received initial settings from server");
+			var thread = new Thread(ListenForSettingsUpdates);
+			thread.Start();
+		}
+
+		// Listens for settings updates from the server and applies updates to the local settings.
+		private void ListenForSettingsUpdates()
+		{
+			var receivedBytes = new byte[2 * sizeof(int)];
+			while (true)
+			{
+				int numBytes;
+				try
+				{
+					numBytes = _settingsChannel.GetStream().Read(receivedBytes);
+				}
+				catch (SocketException ex)
+				{
+					Debug.WriteLine($"Exception thrown while listening for settings updates. Stopping the listener. Exception: {ex}");
+					return;
+				}
+				if (numBytes == 0)
+				{
+					Debug.WriteLine("Settings channel is shutting down");
+					return;
+				}
+				if (numBytes != receivedBytes.Length)
+				{
+					throw new InvalidOperationException(
+						$"Received a settings update message of unexpected size: got {numBytes} bytes, want {receivedBytes.Length} bytes");
+				}
+				_roundtripDelayMillis = BitConverter.ToInt32(receivedBytes, 0);
+				_jitterMillis = BitConverter.ToInt32(receivedBytes, sizeof(int));
+			}
+		}
+
 		// Listens for game state updates from the server. When an update arrives, it is stored
 		// until this client's next Update call.
 		private void ListenForStateUpdates(object data)
@@ -204,7 +296,7 @@ namespace GameNetBasicsClient
 				if (receivedBytes.Length != sizeof(int) * 2)
 				{
 					throw new InvalidOperationException(
-						$"Received a game state update message of unexpected size: got {receivedBytes.Length}, want {sizeof(int) * 2}");
+						$"Received a game state update message of unexpected size: got {receivedBytes.Length} bytes, want {sizeof(int) * 2} bytes");
 				}
 				// Messages received from the server are assumed to be the X and Y coordinates of
 				// the player.
@@ -227,13 +319,17 @@ namespace GameNetBasicsClient
 			data[2] = BitConverter.GetBytes(leftPressed)[0];
 			data[3] = BitConverter.GetBytes(rightPressed)[0];
 			// Send data to the server asynchronously.
-			Task.Run(() => SendDataToServer(data, "input")).ConfigureAwait(false);
+			SendDataToServerAsync(data, "input");
 		}
 
-		// Sends the given data to the server. dataDescription is used for context in the exception
-		// message if an exception is thrown.
-		private void SendDataToServer(byte[] data, string dataDescription)
+		// Sends the given data to the server asynchronously. Artificial network delay is
+		// introduced here (i.e. _roundtripDelayMillis and _jitterMillis). dataDescription is used
+		// for context in the exception message if an exception is thrown.
+		private async void SendDataToServerAsync(byte[] data, string dataDescription)
 		{
+			int jitterMillis = _rng.Next(-_jitterMillis, _jitterMillis + 1);
+			int delayMillis = (_roundtripDelayMillis / 2) + jitterMillis;
+			await Task.Delay(delayMillis).ConfigureAwait(false);
 			try
 			{
 				_client.Send(data, data.Length);
