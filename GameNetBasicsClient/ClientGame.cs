@@ -4,7 +4,6 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -126,10 +125,12 @@ namespace GameNetBasicsClient
 		{
 			// The connection protocol is super basic and not robust, but it will work for this
 			// project.
+
+			// First we set up the client connection by sending the CONNECTION_INITIATION message
+			// to the server's connection port.
 			_client = new UdpClient();
-			// First we send the CONNECTION_INITIATION message to the server's connection port.
 			var serverConnEndpoint = new IPEndPoint(
-				IPAddress.Parse(Protocol.CONNECTION_HOSTNAME), Protocol.CONNECTION_PORT);
+				IPAddress.Parse(Protocol.SERVER_HOSTNAME), Protocol.CONNECTION_PORT);
 			byte[] connBytes = Encoding.ASCII.GetBytes(Protocol.CONNECTION_INITIATION);
 			try
 			{
@@ -161,6 +162,7 @@ namespace GameNetBasicsClient
 				throw new InvalidOperationException(errorMessage);
 			}
 			Debug.WriteLine($"Received ACK from server. Connecting to {serverUpdatesEndpoint}");
+
 			// We connect to the port that the server sent the ACK message on. This will be a
 			// different port than the connection port.
 			try
@@ -219,14 +221,13 @@ namespace GameNetBasicsClient
 		// Sends this client's input to be processed by the server.
 		private void SendInput(bool upPressed, bool downPressed, bool leftPressed, bool rightPressed)
 		{
-			List<byte> dataList = new List<byte>();
-			dataList.AddRange(BitConverter.GetBytes(upPressed));
-			dataList.AddRange(BitConverter.GetBytes(downPressed));
-			dataList.AddRange(BitConverter.GetBytes(leftPressed));
-			dataList.AddRange(BitConverter.GetBytes(rightPressed));
-			byte[] data = dataList.ToArray();
+			var data = new byte[4];
+			data[0] = BitConverter.GetBytes(upPressed)[0];
+			data[1] = BitConverter.GetBytes(downPressed)[0];
+			data[2] = BitConverter.GetBytes(leftPressed)[0];
+			data[3] = BitConverter.GetBytes(rightPressed)[0];
 			// Send data to the server asynchronously.
-			Task.Run(() => SendDataToServer(data, "input"));
+			Task.Run(() => SendDataToServer(data, "input")).ConfigureAwait(false);
 		}
 
 		// Sends the given data to the server. dataDescription is used for context in the exception
@@ -237,7 +238,7 @@ namespace GameNetBasicsClient
 			{
 				_client.Send(data, data.Length);
 			}
-			catch (SocketException ex)
+			catch (Exception ex)
 			{
 				Debug.WriteLine($"Exception thrown while sending {dataDescription} to server: {ex}");
 			}

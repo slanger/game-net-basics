@@ -23,7 +23,7 @@ namespace GameNetBasicsServer
 		private Texture2D _playerTexture;
 		private double _framerate;
 
-		private UdpClient _connectionClient;
+		private UdpClient _connectionsListener;
 		private UdpClient _client = null;
 		private ClientState _clientState;
 		private List<InputFrame> _inputFrames = new List<InputFrame>(20);
@@ -68,8 +68,8 @@ namespace GameNetBasicsServer
 
 		protected override void Dispose(bool disposing)
 		{
+			_connectionsListener?.Dispose();
 			_client?.Dispose();
-			_connectionClient?.Dispose();
 			base.Dispose(disposing);
 		}
 
@@ -136,9 +136,9 @@ namespace GameNetBasicsServer
 		// game state updates.
 		private void InitializeServer()
 		{
-			_connectionClient = new UdpClient(Protocol.CONNECTION_PORT);
-			var thread = new Thread(ListenForClients);
-			thread.Start();
+			_connectionsListener = new UdpClient(Protocol.CONNECTION_PORT);
+			var connectionsThread = new Thread(ListenForClients);
+			connectionsThread.Start();
 		}
 
 		// Listens for connections from clients on the connection port. Starts a new thread for
@@ -148,7 +148,7 @@ namespace GameNetBasicsServer
 			var sender = new IPEndPoint(IPAddress.Any, 0);
 			while (true)
 			{
-				Debug.WriteLine($"Listening for client connections at {_connectionClient.Client.LocalEndPoint}");
+				Debug.WriteLine($"Listening for client connections at {_connectionsListener.Client.LocalEndPoint}");
 				// When the socket is closed, Receive() will throw an exception, and then the
 				// server will stop listening for client connections. There's probably a way to do
 				// this more gracefully (e.g. using a cancellation token to cancel any ongoing
@@ -156,7 +156,7 @@ namespace GameNetBasicsServer
 				byte[] receivedBytes;
 				try
 				{
-					receivedBytes = _connectionClient.Receive(ref sender);
+					receivedBytes = _connectionsListener.Receive(ref sender);
 				}
 				catch (SocketException ex)
 				{
@@ -184,6 +184,8 @@ namespace GameNetBasicsServer
 			// TODO: Handle more than one client.
 			IPEndPoint clientEndpoint = (IPEndPoint)clientEndpointObj;
 			Debug.WriteLine($"Created new thread for {clientEndpoint} client");
+
+			// Set up client connection.
 			var client = new UdpClient();
 			try
 			{
@@ -194,7 +196,7 @@ namespace GameNetBasicsServer
 				Debug.WriteLine($"Exception thrown while connecting to {clientEndpoint} client: {ex}");
 				return;
 			}
-			Debug.WriteLine($"Connected new socket: {client.Client.LocalEndPoint} -> {client.Client.RemoteEndPoint}");
+			Debug.WriteLine($"Connected new client channel: {client.Client.LocalEndPoint} -> {client.Client.RemoteEndPoint}");
 			byte[] connAck = Encoding.ASCII.GetBytes(Protocol.CONNECTION_ACK);
 			try
 			{
@@ -258,12 +260,13 @@ namespace GameNetBasicsServer
 		// Sends the current game state to the client.
 		private void SendStateToClient()
 		{
-			List<byte> dataList = new List<byte>();
-			dataList.AddRange(BitConverter.GetBytes(_clientState.X));
-			dataList.AddRange(BitConverter.GetBytes(_clientState.Y));
-			byte[] data = dataList.ToArray();
-			// Send data to the server asynchronously.
-			Task.Run(() => SendDataToClient(data, "gamestate"));
+			byte[] xBytes = BitConverter.GetBytes(_clientState.X);
+			byte[] yBytes = BitConverter.GetBytes(_clientState.Y);
+			var dataList = new List<byte>(xBytes.Length + yBytes.Length);
+			dataList.AddRange(xBytes);
+			dataList.AddRange(yBytes);
+			// Send data to the client asynchronously.
+			Task.Run(() => SendDataToClient(dataList.ToArray(), "gamestate")).ConfigureAwait(false);
 		}
 
 		// Sends the given data to the client. dataDescription is used for context in the exception
@@ -274,7 +277,7 @@ namespace GameNetBasicsServer
 			{
 				_client.Send(data, data.Length);
 			}
-			catch (SocketException ex)
+			catch (Exception ex)
 			{
 				Debug.WriteLine($"Exception thrown while sending {dataDescription} to client: {ex}");
 			}
