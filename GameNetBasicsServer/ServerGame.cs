@@ -403,7 +403,7 @@ namespace GameNetBasicsServer
 		private async void SendDataToClientAsync(byte[] data, string dataDescription)
 		{
 			int jitterMillis = _rng.Next(-_jitterMillis, _jitterMillis + 1);
-			int delayMillis = (_roundtripDelayMillis / 2) + jitterMillis;
+			int delayMillis = Math.Max((_roundtripDelayMillis / 2) + jitterMillis, 0);
 			await Task.Delay(delayMillis).ConfigureAwait(false);
 			try
 			{
