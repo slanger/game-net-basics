@@ -11,11 +11,17 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using GameNetBasicsCommon;
+using System.Collections.Generic;
 
 namespace GameNetBasicsClient
 {
 	public class ClientGame : Game
 	{
+		private const int INITIAL_ROUNDTRIP_DELAY_MILLIS = 200;
+		private const int INITIAL_JITTER_MILLIS = 25;
+		private const int ROUNDTRIP_DELAY_INCREMENT_MILLIS = 20;
+		private const int JITTER_INCREMENT_MILLIS = 5;
+
 		private GraphicsDeviceManager _graphics;
 		private SpriteBatch _spriteBatch;
 		private SpriteFont _debugFont;
@@ -30,8 +36,10 @@ namespace GameNetBasicsClient
 		private readonly object _clientStateLock = new object();
 
 		private TcpClient _settingsChannel;
-		private int _roundtripDelayMillis;
-		private int _jitterMillis;
+		private int _roundtripDelayMillis = INITIAL_ROUNDTRIP_DELAY_MILLIS;
+		private int _jitterMillis = INITIAL_JITTER_MILLIS;
+		private bool _sendDelayKeyPressed = false;
+		private bool _sendJitterKeyPressed = false;
 
 		public ClientGame()
 		{
@@ -63,6 +71,7 @@ namespace GameNetBasicsClient
 		protected override void Dispose(bool disposing)
 		{
 			_client?.Dispose();
+			_settingsChannel?.Dispose();
 			base.Dispose(disposing);
 		}
 
@@ -73,6 +82,44 @@ namespace GameNetBasicsClient
 			KeyboardState keyState = Keyboard.GetState();
 			if (keyState.IsKeyDown(Keys.Escape))
 				Exit();
+
+			int oldDelay = _roundtripDelayMillis;
+			int oldJitter = _jitterMillis;
+
+			if (keyState.IsKeyDown(Keys.D))
+			{
+				if (!_sendDelayKeyPressed)
+				{
+					_sendDelayKeyPressed = true;
+					if (keyState.IsKeyDown(Keys.LeftShift) || keyState.IsKeyDown(Keys.RightShift))
+						_roundtripDelayMillis = Math.Max(_roundtripDelayMillis - ROUNDTRIP_DELAY_INCREMENT_MILLIS, 0);
+					else
+						_roundtripDelayMillis = Math.Min(_roundtripDelayMillis + ROUNDTRIP_DELAY_INCREMENT_MILLIS, 60000);
+				}
+			}
+			else
+			{
+				_sendDelayKeyPressed = false;
+			}
+
+			if (keyState.IsKeyDown(Keys.J))
+			{
+				if (!_sendJitterKeyPressed)
+				{
+					_sendJitterKeyPressed = true;
+					if (keyState.IsKeyDown(Keys.LeftShift) || keyState.IsKeyDown(Keys.RightShift))
+						_jitterMillis = Math.Max(_jitterMillis - JITTER_INCREMENT_MILLIS, 0);
+					else
+						_jitterMillis = Math.Min(_jitterMillis + JITTER_INCREMENT_MILLIS, 60000);
+				}
+			}
+			else
+			{
+				_sendJitterKeyPressed = false;
+			}
+
+			if (_roundtripDelayMillis != oldDelay || _jitterMillis != oldJitter)
+				SendSettingsToServer(runAsync: true);
 
 			ClientState state;
 			lock (_clientStateLock)
@@ -205,8 +252,8 @@ namespace GameNetBasicsClient
 			}
 			Debug.WriteLine($"Connected settings channel: {_settingsChannel.Client.LocalEndPoint} -> {_settingsChannel.Client.RemoteEndPoint}");
 
-			// Receive initial settings.
-			byte[] settingsBytes = new byte[4 * sizeof(int)];
+			// Receive initial settings from the server.
+			byte[] settingsBytes = new byte[2 * sizeof(int)];
 			int numBytes;
 			try
 			{
@@ -223,12 +270,8 @@ namespace GameNetBasicsClient
 				Debug.WriteLine(errorMessage);
 				throw new InvalidOperationException(errorMessage);
 			}
-			int i = 0;
-			_roundtripDelayMillis = BitConverter.ToInt32(settingsBytes, i);
-			i += sizeof(int);
-			_jitterMillis = BitConverter.ToInt32(settingsBytes, i);
-			i += sizeof(int);
 			var state = new ClientState();
+			int i = 0;
 			state.X = BitConverter.ToInt32(settingsBytes, i);
 			i += sizeof(int);
 			state.Y = BitConverter.ToInt32(settingsBytes, i);
@@ -236,40 +279,11 @@ namespace GameNetBasicsClient
 			{
 				_clientState = state;
 			}
-			Debug.WriteLine("Received initial settings from server");
-			var thread = new Thread(ListenForSettingsUpdates);
-			thread.Start();
-		}
+			Debug.WriteLine("Received initial settings from the server");
 
-		// Listens for settings updates from the server and applies updates to the local settings.
-		private void ListenForSettingsUpdates()
-		{
-			var receivedBytes = new byte[2 * sizeof(int)];
-			while (true)
-			{
-				int numBytes;
-				try
-				{
-					numBytes = _settingsChannel.GetStream().Read(receivedBytes);
-				}
-				catch (SocketException ex)
-				{
-					Debug.WriteLine($"Exception thrown while listening for settings updates. Stopping the listener. Exception: {ex}");
-					return;
-				}
-				if (numBytes == 0)
-				{
-					Debug.WriteLine("Settings channel is shutting down");
-					return;
-				}
-				if (numBytes != receivedBytes.Length)
-				{
-					throw new InvalidOperationException(
-						$"Received a settings update message of unexpected size: got {numBytes} bytes, want {receivedBytes.Length} bytes");
-				}
-				_roundtripDelayMillis = BitConverter.ToInt32(receivedBytes, 0);
-				_jitterMillis = BitConverter.ToInt32(receivedBytes, sizeof(int));
-			}
+			// Send initial settings to the server.
+			SendSettingsToServer(runAsync: false);
+			Debug.WriteLine("Sent initial settings to the server");
 		}
 
 		// Listens for game state updates from the server. When an update arrives, it is stored
@@ -307,6 +321,37 @@ namespace GameNetBasicsClient
 				{
 					_clientState = state;
 				}
+			}
+		}
+
+		// Sends the current settings to the server.
+		private void SendSettingsToServer(bool runAsync)
+		{
+			byte[] delayBytes = BitConverter.GetBytes(_roundtripDelayMillis);
+			byte[] jitterBytes = BitConverter.GetBytes(_jitterMillis);
+			var dataList = new List<byte>(delayBytes.Length + jitterBytes.Length);
+			dataList.AddRange(delayBytes);
+			dataList.AddRange(jitterBytes);
+			if (runAsync)
+			{
+				Task.Run(() => SendSettingsDataToServer(dataList.ToArray())).ConfigureAwait(false);
+			}
+			else
+			{
+				SendSettingsDataToServer(dataList.ToArray());
+			}
+		}
+
+		// Sends the given settings data to the server.
+		private void SendSettingsDataToServer(byte[] data)
+		{
+			try
+			{
+				_settingsChannel.GetStream().Write(data);
+			}
+			catch (Exception ex)
+			{
+				Debug.WriteLine($"Exception thrown while sending settings data to server: {ex}");
 			}
 		}
 
