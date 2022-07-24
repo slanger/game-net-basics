@@ -26,8 +26,7 @@ namespace GameNetBasicsClient
 		private SpriteBatch _spriteBatch;
 		private SpriteFont _debugFont;
 		private Texture2D _playerTexture;
-		private Rectangle _playerCollider = new Rectangle(
-			Protocol.PLAYER_START_X, Protocol.PLAYER_START_Y, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT);
+		private Rectangle _playerCollider = new Rectangle(0, 0, Protocol.PLAYER_WIDTH, Protocol.PLAYER_HEIGHT);
 		private double _framerate;
 		private readonly Random _rng = new Random();
 
@@ -182,11 +181,13 @@ namespace GameNetBasicsClient
 			// First we set up the settings channel and get the initial settings.
 			SetUpSettingsChannel();
 
+			// Next we receive the server's update channel port in the settings channel.
+			int serverConnPort = ReceiveUpdateChannelPortFromServer();
+
 			// Then we set up the client connection by sending the CONNECTION_INITIATION message to
 			// the server's connection port.
 			_client = new UdpClient();
-			var serverConnEndpoint = new IPEndPoint(
-				IPAddress.Parse(Protocol.SERVER_HOSTNAME), Protocol.CONNECTION_PORT);
+			var serverConnEndpoint = new IPEndPoint(IPAddress.Parse(Protocol.SERVER_HOSTNAME), serverConnPort);
 			byte[] connBytes = Encoding.ASCII.GetBytes(Protocol.CONNECTION_INITIATION);
 			try
 			{
@@ -284,6 +285,21 @@ namespace GameNetBasicsClient
 			// Send initial settings to the server.
 			SendSettingsToServer(runAsync: false);
 			Debug.WriteLine("Sent initial settings to the server");
+		}
+
+		private int ReceiveUpdateChannelPortFromServer()
+		{
+			var receivedBytes = new byte[sizeof(int)];
+			int numBytes;
+			numBytes = _settingsChannel.GetStream().Read(receivedBytes);
+			if (numBytes != receivedBytes.Length)
+			{
+				throw new InvalidOperationException(
+					$"Received an update channel port message of unexpected size: got {numBytes} bytes, want {receivedBytes.Length} bytes");
+			}
+			int updateChannelPort = BitConverter.ToInt32(receivedBytes);
+			Debug.WriteLine($"Received update channel port from the server: {updateChannelPort}");
+			return updateChannelPort;
 		}
 
 		// Listens for game state updates from the server. When an update arrives, it is stored

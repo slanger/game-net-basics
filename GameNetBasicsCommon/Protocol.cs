@@ -1,17 +1,14 @@
 ﻿namespace GameNetBasicsCommon
 {
+	// This class contains constants needed for the networking protocols.
 	public class Protocol
 	{
 		public const string SERVER_HOSTNAME = "127.0.0.1";
-		public const int CONNECTION_PORT = 11000;
+		public const int SETTINGS_CHANNEL_PORT = 11000;
 		public const string CONNECTION_INITIATION = "GameNetBasics: CONNECT";
 		public const string CONNECTION_ACK = "GameNetBasics: ACK";
-		public const int SETTINGS_CHANNEL_PORT = 11001;
 
 		public const int PLAYER_WIDTH = 50;
 		public const int PLAYER_HEIGHT = 50;
-		public const int PLAYER_START_X = 0;
-		public const int PLAYER_START_Y = 0;
-		public const int PLAYER_SPEED = 4;
 	}
 }
